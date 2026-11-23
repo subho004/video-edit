@@ -61,7 +61,8 @@ and the open decisions from `map.json -> decisions_needed` plus anything you not
 from the brief: hook, rhythm, direction matching, hero/ending, speed/fx/crop choices, one-line `rationale` per shot. Optional:
 `$S/plan.py snap plan.json --track song.mp3 --every 2` snaps cuts to the beat grid. Always `$S/plan.py validate plan.json`
 (fix errors, read warnings) and `plan.py show` to print the table. Craft guidance: `references/reel-playbook.md`
-(or `references/product-playbook.md`). Field reference: `references/plan-schema.md`.
+(or `references/product-playbook.md`). Pick a story structure and sequence blocks from `references/cinematic-sequences.md`
+and state the choice in the plan's rationale. Field reference: `references/plan-schema.md`.
 
 ### 5. Approve the cut  (GATE 2)
 Show the shot table (time | shot | source | why) and the left-out list. Ask for approval or edits. Set `approved: true` on approved shots.
@@ -84,6 +85,7 @@ a new durable preference, add one generic line to `references/learned-preference
 | Situation | Read |
 |---|---|
 | Building the shot list for a reel, pacing, hook, text, walking footage, trends | `references/reel-playbook.md` |
+| Choosing a story structure, ordering clips, match cuts, J/L-cuts, ramps, beat/sound/caption timing | `references/cinematic-sequences.md` |
 | Product / promo / explainer / talking or demo video, captions | `references/product-playbook.md` |
 | Which questions to ask and what defaults to propose | `references/decisions.md` |
 | map.json fields, annotating clips, interpreting flags | `references/analysis-map.md` |
