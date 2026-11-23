@@ -1,0 +1,10 @@
+{
+  "schema": "video-edit/plan@1",
+  "type": "product",
+  "name": "Launch",
+  "brief": {"goal": "12 s product teaser", "platform": "instagram_reel", "target_sec": 12, "text_line": null, "notes": []},
+  "output": {"width": 2160, "height": 3840, "fps": "auto", "silent": false},
+  "product": {"clip": "product.mp4", "hook": "Meet the one thing\nyou'll use every day", "offer": "Now available", "captions": false, "duration": 12},
+  "shots": [{"id": "p1", "src": "product.mp4", "dur": 12, "rationale": "single hero clip with reveal", "approved": false}],
+  "decisions": []
+}

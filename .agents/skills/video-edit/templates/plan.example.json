@@ -1,0 +1,22 @@
+{
+  "schema": "video-edit/plan@1",
+  "type": "reel",
+  "name": "Trip",
+  "brief": {"goal": "30 s travel reel, scenic montage then a calm walk", "platform": "instagram_reel", "target_sec": 30,
+            "text_line": "POV: you finally escape\nsomewhere quiet", "music": "added in app (silent output)", "hero": "s1", "ending": "s7", "notes": []},
+  "output": {"width": 2160, "height": 3840, "fps": "auto", "hdr": "auto", "sdr_fallback": false, "fade_out": 0.6, "silent": true},
+  "text": {"lines": "POV: you finally escape\nsomewhere quiet", "start": 0.3, "y": 330, "size": 84},
+  "music": {"track": null, "snap_every": null},
+  "shots": [
+    {"id": "s1", "src": "clip_a.mp4", "in": 5.5, "dur": 3.0, "speed": 1.0, "rationale": "hook: strongest opening motion", "approved": false},
+    {"id": "s2", "src": "clip_b.mp4", "in": 4.0, "dur": 2.5, "speed": 2.0, "fx": "zoom", "rationale": "road at 2x, punch-in on the cut", "approved": false},
+    {"id": "s3", "src": "photo_a.HEIC", "dur": 1.2, "push": 0.04, "crop": {"x": 0.12, "y": 0.0, "hf": 1.0}, "rationale": "still burst, rhythm", "approved": false},
+    {"id": "s4", "src": "clip_c.mp4", "in": 0.8, "dur": 2.5, "speed": 1.0, "ramp": [0.8, 1.4, 0.4], "fx": "flash", "rationale": "slow-mo hit on the action", "approved": false},
+    {"id": "s5", "src": "clip_land.mp4", "in": 3.0, "dur": 2.5, "speed": 1.0, "crop": {"x": 0.3, "y": 0.5, "hf": 1.0}, "rationale": "landscape reframed to 9:16", "approved": false},
+    {"id": "s6", "src": "clip_night.mp4", "in": 20.0, "dur": 3.0, "speed": 1.0, "zoom": {"factor": 1.9, "cx": 0.5, "cy": 0.4}, "rationale": "small lit subject, punch-in", "approved": false},
+    {"id": "s7", "src": "clip_walk.mp4", "in": 0.5, "dur": 6.0, "speed": 1.0, "rationale": "ending: calm POV walk, fades out", "approved": false}
+  ],
+  "constraints": {"max_dur": 35, "avg_shot": [1.2, 3.2], "match_direction": true, "no_end_on_camera_turn": true},
+  "decisions": [{"q": "text line?", "a": "one POV line", "by": "user"}, {"q": "music?", "a": "added in the app", "by": "default"}],
+  "status": "draft"
+}

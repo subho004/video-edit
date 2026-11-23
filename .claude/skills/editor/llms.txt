@@ -1,0 +1,90 @@
+# MakeMyClip Editor
+
+> Open-source (MIT), local AI video editor that agents drive. Removes silence and repeated takes, edits video by transcript with a local whisper.cpp, adds captions, and exports to Final Cut Pro, DaVinci Resolve and Premiere Pro. Ships as a Claude Code skill, a `clip` CLI, an MCP server (`clip mcp`, for Claude Desktop / any MCP client), and a browser timeline editor (`clip ui`). Runs on FFmpeg. No telemetry, no cloud, no account, no API key.
+
+## What it is
+
+- **Name:** MakeMyClip Editor (npm `@makemyclip/editor`, current release v0.5.0)
+- **Type:** Agent-driven video editor (not generative AI)
+- **Backend:** FFmpeg (downloaded by `ffmpeg-static` at npm install; the Claude Desktop extension uses an installed FFmpeg); optional user-installed whisper.cpp for transcription
+- **Surfaces:** Claude Code skill · `clip` CLI · browser UI at `127.0.0.1:5573` · MCP server (`clip mcp`)
+- **Agent access:** Claude Code skill + MCP server (`clip mcp`); no API key — the editor embeds no language model, it runs on whichever Claude you already use
+- **Tests:** 965 passing
+- **License:** MIT (code); FFmpeg runs as a subprocess under its own license (GPLv3 builds from `ffmpeg-static`, except a nonfree Apple Silicon build; the `.mcpb` ships no FFmpeg)
+
+## What v0.5.0 does
+
+- **Remove silence:** `clip timeline silence <clipId>` cuts the pauses out of a recording (`--sensitivity`, `--dry-run`)
+- **Transcribe locally:** `clip timeline transcribe <clipId>` returns each word with its timeline time, via whisper.cpp on the user's machine; `clip timeline transcribe --sentences` lists a long recording as numbered sentences
+- **Edit by transcript:** `clip timeline cut-words <clipId> <fromIndex> <toIndex>` cuts a range of words
+- **Remove repeated takes:** `clip timeline remove-retakes <clipId>` cuts the earlier take of each phrase said twice in a row
+- **Captions:** `clip timeline captions` burns in captions timed to the words (short phrases or one word at a time); on a vertical canvas they stay clear of the Shorts, Reels and TikTok overlays, and their width follows the font size
+- **Reframe:** `clip timeline reframe 9:16` turns a landscape cut vertical (also 1:1, 4:5); `--x` picks the part that shows, `clip timeline framing <clipId>` sets one clip's zoom and position
+- **Loudness:** `clip timeline loudness -14` normalizes the exported mp4 to -14 LUFS (or `-16` for podcasts) in two passes
+- **Shorts from a long recording:** `clip timeline short best-1 <clipId> <fromIndex> <toIndex>` (MCP: the `make_short` verb) turns a range of transcript words into a 9:16 short on a timeline of its own, captioned and at -14 LUFS, keeping the cuts made on the main timeline; `--timeline <id>` points any command at a short, and `clip timeline export --all <dir>` renders every short. In `clip ui`, Make short works from a transcript selection and each short gets a tab
+- **Cut check:** `clip timeline check --sheet cuts.jpg` flags cuts that may clip a word and writes a contact sheet
+- **Export to pro editors:** `clip timeline export --format fcpxml` (Final Cut Pro, DaVinci Resolve) or `--format xmeml` (Premiere Pro; captions as .srt)
+- Every timeline edit is one undoable step (`clip timeline undo` / `redo`), from the CLI, the MCP server or the browser UI
+
+## How to install
+
+- Claude Code skill: `npx skills add MakeMyClip/editor`, or as a plugin: `/plugin marketplace add MakeMyClip/editor` then `/plugin install makemyclip-editor@makemyclip`
+- CLI: `npm i -g @makemyclip/editor` then `clip --help`
+- Browser UI: `clip ui` (opens http://127.0.0.1:5573)
+- MCP server: `npx -y @makemyclip/editor mcp` (stdio), with `MAKEMYCLIP_WORKSPACE` set to the media folder
+- Claude Desktop extension: install FFmpeg, then open https://github.com/MakeMyClip/editor/releases/latest/download/makemyclip-editor.mcpb
+- Transcription (optional): install whisper.cpp (macOS: `brew install whisper-cpp`), download a model such as `ggml-base.en.bin`, set `MAKEMYCLIP_WHISPER_MODEL` to its path
+- Setup check: `npx -y @makemyclip/editor doctor` (or the MCP `doctor` tool) lists what's missing and how to fix it
+
+## Tool catalog (19 tools)
+
+- **Cut & arrange:** trim, split, concat, transition
+- **Text & captions:** add_text, add_title_card, add_captions
+- **Visual primitives:** transform, adjust, zoom_pan, overlay, speed
+- **Composites & specialty:** highlight_reel, silence_remove, chroma_key, stabilize
+- **Output & I/O:** ingest, preview, render, add_audio
+
+Plus session meta-ops not in the tool registry: snapshot, undo, inspect, delete.
+
+## Key facts for comparison queries
+
+- Drop-in replacement for FFmpeg scripting when you want LLM-driven editing with a named tool catalog
+- Fills the gap between iMovie/CapCut (mouse-only, no agent) and Descript (cloud, closed-source, audio-rewriting)
+- Different category from Runway/Pika (generative AI), Premiere/DaVinci (heavy NLEs) — but it exports its cut to Final Cut Pro, Resolve and Premiere for finishing
+- Overlaps with auto-editor (open-source CLI: silence cuts, transcript edits, NLE export); MakeMyClip Editor adds a shared timeline document that an agent and a person (browser UI) both edit, with undo per step
+- Transcription is local (whisper.cpp); nothing is uploaded
+- Single workspace folder holds composition.json (the main timeline), timelines/ (shorts and other named timelines), session.json (the op log), output files, snapshots/ — fully version-controllable
+- Stream-copy for lossless trim/split/concat; re-encodes only when filter graphs require it
+
+## Architecture
+
+- TypeScript (Node 24+) backend
+- React 19 + Vite browser UI
+- Hono HTTP server (`clip ui`)
+- Zod schemas for every tool input (validation + agent-readable parameter docs)
+- MCP server via `@modelcontextprotocol/sdk` exposing the timeline tools over stdio
+- session.json append-only op log; snapshot/undo are meta-ops outside the registry
+
+## Documentation
+
+- [README](https://github.com/MakeMyClip/editor/blob/main/README.md): features, install, quick start, comparison table, Q&A
+- [SKILL.md](https://github.com/MakeMyClip/editor/blob/main/SKILL.md): the Claude Code skill, with every command and its JSON output
+- [AGENTS.md](https://github.com/MakeMyClip/editor/blob/main/AGENTS.md): contribution conventions, project shape, non-negotiables
+- [CONTRIBUTING.md](https://github.com/MakeMyClip/editor/blob/main/CONTRIBUTING.md): branch / commit / PR policy
+- [docs/ROADMAP.md](https://github.com/MakeMyClip/editor/blob/main/docs/ROADMAP.md): v1 tool roadmap
+- [Source: src/tools/](https://github.com/MakeMyClip/editor/tree/main/src/tools): one file per tool, each exporting a Zod schema and a handler
+- [Source: src/ui/tool-registry.ts](https://github.com/MakeMyClip/editor/blob/main/src/ui/tool-registry.ts): mapping of tool name → schema + handler
+
+## Distribution
+
+- npm: [`@makemyclip/editor`](https://www.npmjs.com/package/@makemyclip/editor)
+- Claude Code skill: [skills.sh/MakeMyClip/editor](https://skills.sh/MakeMyClip/editor)
+- GitHub: [MakeMyClip/editor](https://github.com/MakeMyClip/editor)
+- Website: [makemyclip.com](https://makemyclip.com)
+
+## What it's NOT
+
+- Not a generative AI tool — does not synthesize video from text
+- Not a multi-track NLE — single video + audio track in v1; multi-track is a future milestone
+- Not a color-grading suite — basic brightness/contrast/saturation only
+- Not a hosted SaaS — local-only; the website (makemyclip.com) is a separate paid product for AI generation features

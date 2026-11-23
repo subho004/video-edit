@@ -1,0 +1,455 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { emptyComposition } from '../src/timeline/composition.js';
+import {
+  applyVerbs,
+  CompositionConflictError,
+  mutateComposition,
+  readComposition,
+  readDocOpLog,
+  undoLastDocOp,
+} from '../src/timeline/document-store.js';
+import { applyOps, type CompositionOp, mediaClip, videoTrack } from '../src/timeline/ops.js';
+import type { MediaId } from '../src/timeline/schema.js';
+import { type Transcript, TranscriptError } from '../src/timeline/transcript.js';
+import {
+  EditableVerbSchema,
+  lowerVerb,
+  lowerVerbs,
+  type VerbContext,
+} from '../src/timeline/verbs.js';
+
+const M = 'm_aaaaaaaaaaaa' as MediaId;
+const ctx = (durationSec = 10): VerbContext => ({
+  ingest: async () => ({ mediaId: M, durationSec }),
+  analyzeSilence: async () => {
+    throw new Error('not used');
+  },
+  transcript: async () => {
+    throw new Error('not used');
+  },
+  speechLevels: async () => null,
+  readTimeline: async () => {
+    throw new Error('not used');
+  },
+  defaultTrack: 'v0',
+});
+
+type AddClipOp = Extract<CompositionOp, { op: 'addClip' }>;
+const addClips = (ops: CompositionOp[]): AddClipOp[] =>
+  ops.filter((o): o is AddClipOp => o.op === 'addClip');
+
+describe('lowerVerb', () => {
+  const empty = emptyComposition();
+
+  it('add_media ingests, creates the default track, and appends a media clip', async () => {
+    const ops = await lowerVerb(empty, { verb: 'add_media', path: '/a.mp4' }, ctx());
+    expect(ops).toMatchObject([
+      { op: 'addTrack', track: { id: 'v0' } },
+      {
+        op: 'addClip',
+        trackId: 'v0',
+        clip: { kind: 'media', mediaId: M, sourceInSec: 0, sourceOutSec: 10, startSec: 0 },
+      },
+    ]);
+  });
+
+  it('add_media honors explicit start/trim/track and skips addTrack when it exists', async () => {
+    const doc = applyOps(empty, [{ op: 'addTrack', track: videoTrack({ id: 'v0' }) }]);
+    const ops = await lowerVerb(
+      doc,
+      {
+        verb: 'add_media',
+        path: '/a.mp4',
+        track: 'v0',
+        startSec: 5,
+        sourceInSec: 1,
+        sourceOutSec: 4,
+      },
+      ctx(),
+    );
+    expect(ops).toMatchObject([
+      { op: 'addClip', clip: { sourceInSec: 1, sourceOutSec: 4, startSec: 5 } },
+    ]);
+    expect(ops.some((o) => o.op === 'addTrack')).toBe(false);
+  });
+
+  it('add_text lowers style and appends after the last clip by default', async () => {
+    const ops = await lowerVerb(
+      empty,
+      { verb: 'add_text', text: 'hi', durationSec: 3, color: 'red' },
+      ctx(),
+    );
+    expect(ops).toMatchObject([
+      { op: 'addTrack', track: { id: 'v0' } },
+      {
+        op: 'addClip',
+        clip: { kind: 'text', text: 'hi', durationSec: 3, style: { color: 'red' } },
+      },
+    ]);
+  });
+
+  it('edit verbs lower 1:1 to ops', async () => {
+    expect(
+      await lowerVerb(
+        empty,
+        { verb: 'trim', clipId: 'c1', sourceInSec: 1, sourceOutSec: 3 },
+        ctx(),
+      ),
+    ).toEqual([{ op: 'setTrim', clipId: 'c1', sourceInSec: 1, sourceOutSec: 3 }]);
+    expect(
+      await lowerVerb(empty, { verb: 'move', clipId: 'c1', startSec: 2, toTrack: 'v1' }, ctx()),
+    ).toEqual([{ op: 'moveClip', clipId: 'c1', startSec: 2, toTrackId: 'v1' }]);
+    expect(await lowerVerb(empty, { verb: 'remove', clipId: 'c1' }, ctx())).toEqual([
+      { op: 'removeClip', clipId: 'c1' },
+    ]);
+    expect(await lowerVerb(empty, { verb: 'transition', afterClipId: 'c1' }, ctx())).toEqual([
+      {
+        op: 'addTransition',
+        trackId: 'v0',
+        transition: { afterClipId: 'c1', kind: 'fade', durationSec: 1 },
+      },
+    ]);
+    expect(
+      await lowerVerb(
+        empty,
+        { verb: 'set_transform', clipId: 'c1', scale: 2, opacity: 0.5 },
+        ctx(),
+      ),
+    ).toEqual([{ op: 'setTransform', clipId: 'c1', transform: { scale: 2, opacity: 0.5 } }]);
+    const split = await lowerVerb(empty, { verb: 'split', clipId: 'c1', atSec: 2 }, ctx());
+    expect(split[0]).toMatchObject({ op: 'splitClip', clipId: 'c1', atSec: 2 });
+  });
+});
+
+describe('cut_words / remove_retakes', () => {
+  const clip = mediaClip({ id: 'c1', mediaId: M, sourceOutSec: 3, startSec: 0 });
+  const transcript: Transcript = {
+    version: 1,
+    mediaId: M,
+    language: 'en',
+    source: 'whisper-cpp',
+    model: 'ggml-tiny.en.bin',
+    modelKey: '',
+    requestedLanguage: 'auto',
+    sourceSize: 0,
+    sourceMtimeMs: 0,
+    words: ['go', 'now', 'go', 'now', 'please'].map((text, i) => ({
+      text,
+      startSec: i * 0.5,
+      endSec: i * 0.5 + 0.5,
+    })),
+  };
+  const seenIds: (string | undefined)[] = [];
+  const words = (): VerbContext => ({
+    ...ctx(),
+    transcript: async (_comp, _clipId, transcriptId) => {
+      seenIds.push(transcriptId);
+      return { clip, transcript, media: new Map() };
+    },
+  });
+
+  it('cut_words lowers to a silenceCut keeping the rest of the clip', async () => {
+    const ops = await lowerVerb(
+      emptyComposition(),
+      { verb: 'cut_words', clipId: 'c1', fromIndex: 1, toIndex: 2, transcriptId: 't1' },
+      words(),
+    );
+    expect(ops).toEqual([
+      {
+        op: 'silenceCut',
+        clipId: 'c1',
+        keepRegions: [
+          { sourceInSec: 0, sourceOutSec: 0.5 },
+          { sourceInSec: 1.5, sourceOutSec: 3 },
+        ],
+        newClipIds: [expect.any(String)],
+      },
+    ]);
+    expect(seenIds.at(-1)).toBe('t1');
+  });
+
+  it('cut_words refuses words outside the clip', async () => {
+    const short: VerbContext = {
+      ...ctx(),
+      transcript: async () => ({
+        clip: { ...clip, sourceOutSec: 1 },
+        transcript,
+        media: new Map(),
+      }),
+    };
+    await expect(
+      lowerVerb(
+        emptyComposition(),
+        { verb: 'cut_words', clipId: 'c1', fromIndex: 3, toIndex: 4, transcriptId: 't1' },
+        short,
+      ),
+    ).rejects.toBeInstanceOf(TranscriptError);
+  });
+
+  it('remove_retakes cuts the earlier take, and lowers to nothing without one', async () => {
+    const ops = await lowerVerb(
+      emptyComposition(),
+      { verb: 'remove_retakes', clipId: 'c1' },
+      words(),
+    );
+    expect(ops[0]).toMatchObject({
+      keepRegions: [{ sourceInSec: 1, sourceOutSec: 3 }],
+      newClipIds: [],
+    });
+    const noRepeat: VerbContext = {
+      ...ctx(),
+      transcript: async () => ({
+        clip,
+        transcript: { ...transcript, words: transcript.words.slice(1, 3) },
+        media: new Map(),
+      }),
+    };
+    expect(
+      await lowerVerb(emptyComposition(), { verb: 'remove_retakes', clipId: 'c1' }, noRepeat),
+    ).toEqual([]);
+  });
+});
+
+describe('remove_silence', () => {
+  const cutOp: CompositionOp = {
+    op: 'silenceCut',
+    clipId: 'c1',
+    keepRegions: [
+      { sourceInSec: 0, sourceOutSec: 1.6 },
+      { sourceInSec: 2.9, sourceOutSec: 4.6 },
+    ],
+    newClipIds: ['c1b'],
+  };
+  const silenceCtx = (op: CompositionOp | null, seen: unknown[] = []): VerbContext => ({
+    ...ctx(),
+    analyzeSilence: async (_comp, clipId, sensitivity) => {
+      seen.push({ clipId, sensitivity });
+      return { clipId, silenceCount: op ? 2 : 0, keepRegions: [], removedSec: 0, op };
+    },
+  });
+
+  it('lowers to the planned silenceCut, passing the clip and sensitivity through', async () => {
+    const seen: unknown[] = [];
+    const ops = await lowerVerb(
+      emptyComposition(),
+      { verb: 'remove_silence', clipId: 'c1', sensitivity: 0.7 },
+      silenceCtx(cutOp, seen),
+    );
+    expect(ops).toEqual([cutOp]);
+    expect(seen).toEqual([{ clipId: 'c1', sensitivity: 0.7 }]);
+  });
+
+  it('lowers to nothing when no pause was found', async () => {
+    const ops = await lowerVerb(
+      emptyComposition(),
+      { verb: 'remove_silence', clipId: 'c1' },
+      silenceCtx(null),
+    );
+    expect(ops).toEqual([]);
+  });
+
+  it('is an editable verb with sensitivity bounded to 0..1', () => {
+    expect(EditableVerbSchema.parse({ verb: 'remove_silence', clipId: 'c1' })).toEqual({
+      verb: 'remove_silence',
+      clipId: 'c1',
+    });
+    expect(() =>
+      EditableVerbSchema.parse({ verb: 'remove_silence', clipId: 'c1', sensitivity: 1.5 }),
+    ).toThrow();
+  });
+});
+
+describe('reframe and set_framing', () => {
+  const picture = applyOps(emptyComposition(), [
+    { op: 'addTrack', track: videoTrack({ id: 'v0' }) },
+    {
+      op: 'addClip',
+      trackId: 'v0',
+      clip: mediaClip({ id: 'c1', mediaId: M, sourceOutSec: 4, startSec: 0 }),
+    },
+  ]);
+
+  it('reframe lowers to the canvas change and clip positions', async () => {
+    expect(await lowerVerb(picture, { verb: 'reframe', aspect: '9:16', x: 0.2 }, ctx())).toEqual([
+      { op: 'setCanvas', width: 1080, height: 1920, fit: 'cover' },
+      { op: 'setTransform', clipId: 'c1', transform: { x: 0.2 } },
+    ]);
+  });
+
+  it('set_framing lowers to a transform on one media clip', async () => {
+    expect(
+      await lowerVerb(picture, { verb: 'set_framing', clipId: 'c1', scale: 1.3, y: 0 }, ctx()),
+    ).toEqual([{ op: 'setTransform', clipId: 'c1', transform: { scale: 1.3, y: 0 } }]);
+  });
+
+  it('are editable verbs with bounded positions and zoom', () => {
+    expect(EditableVerbSchema.parse({ verb: 'reframe', aspect: '4:5' })).toEqual({
+      verb: 'reframe',
+      aspect: '4:5',
+    });
+    expect(() => EditableVerbSchema.parse({ verb: 'reframe', aspect: '3:2' })).toThrow();
+    expect(() => EditableVerbSchema.parse({ verb: 'reframe', aspect: '9:16', x: 2 })).toThrow();
+    expect(() =>
+      EditableVerbSchema.parse({ verb: 'set_framing', clipId: 'c1', scale: 8 }),
+    ).toThrow();
+    expect(() => EditableVerbSchema.parse({ verb: 'set_transform', clipId: 'c1' })).toThrow();
+  });
+});
+
+describe('set_loudness', () => {
+  it('lowers to setLoudness, and to nothing when already set', async () => {
+    const off = emptyComposition();
+    expect(await lowerVerb(off, { verb: 'set_loudness', targetLufs: -14 }, ctx())).toEqual([
+      { op: 'setLoudness', targetLufs: -14 },
+    ]);
+    expect(await lowerVerb(off, { verb: 'set_loudness', targetLufs: null }, ctx())).toEqual([]);
+    const on = applyOps(off, [{ op: 'setLoudness', targetLufs: -14 }]);
+    expect(await lowerVerb(on, { verb: 'set_loudness', targetLufs: -14 }, ctx())).toEqual([]);
+    expect(await lowerVerb(on, { verb: 'set_loudness', targetLufs: null }, ctx())).toEqual([
+      { op: 'setLoudness', targetLufs: null },
+    ]);
+  });
+
+  it('takes -30..-9 LUFS or null', () => {
+    expect(EditableVerbSchema.parse({ verb: 'set_loudness', targetLufs: null })).toEqual({
+      verb: 'set_loudness',
+      targetLufs: null,
+    });
+    expect(() => EditableVerbSchema.parse({ verb: 'set_loudness', targetLufs: -5 })).toThrow();
+    expect(() => EditableVerbSchema.parse({ verb: 'set_loudness' })).toThrow();
+  });
+});
+
+describe('lowerVerbs (state threads between verbs)', () => {
+  it('the default append point shifts as earlier verbs add clips', async () => {
+    const ops = await lowerVerbs(
+      emptyComposition(),
+      [
+        { verb: 'add_media', path: '/a.mp4' }, // [0,5)
+        { verb: 'add_color', durationSec: 2 }, // should append at 5
+      ],
+      ctx(5),
+    );
+    const color = addClips(ops).find((o) => o.clip.kind === 'color');
+    expect(color?.clip.startSec).toBe(5);
+  });
+});
+
+describe('intent-free verbs lower to no ops (no spurious undo entry)', () => {
+  it('trim/move with no value fields, and an empty set_transform, return []', async () => {
+    const c = ctx();
+    expect(await lowerVerb(emptyComposition(), { verb: 'trim', clipId: 'c1' }, c)).toEqual([]);
+    expect(await lowerVerb(emptyComposition(), { verb: 'move', clipId: 'c1' }, c)).toEqual([]);
+    expect(await lowerVerb(emptyComposition(), { verb: 'set_transform', clipId: 'c1' }, c)).toEqual(
+      [],
+    );
+  });
+});
+
+describe('optional clip id (mid-batch references)', () => {
+  it('add_* honor a caller-supplied id so a later verb in the batch can target it', async () => {
+    const ops = await lowerVerbs(
+      emptyComposition(),
+      [
+        { verb: 'add_color', id: 'card', durationSec: 2 },
+        { verb: 'set_transform', clipId: 'card', opacity: 0.5 },
+      ],
+      ctx(),
+    );
+    expect(addClips(ops)[0]?.clip.id).toBe('card');
+    expect(ops.some((o) => o.op === 'setTransform' && o.clipId === 'card')).toBe(true);
+  });
+});
+
+describe('applyVerbs (op-aware + undoable)', () => {
+  let workspace: string;
+  let saved: string | undefined;
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'mmc-verbs-test-'));
+    saved = process.env.MAKEMYCLIP_WORKSPACE;
+    process.env.MAKEMYCLIP_WORKSPACE = workspace;
+  });
+  afterEach(async () => {
+    if (saved === undefined) delete process.env.MAKEMYCLIP_WORKSPACE;
+    else process.env.MAKEMYCLIP_WORKSPACE = saved;
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('applies verbs through mutateComposition and records ONE undoable entry', async () => {
+    const { doc, ops } = await applyVerbs([{ verb: 'add_media', path: '/a.mp4' }], ctx(6));
+    expect(doc.tracks[0]?.clips[0]?.kind).toBe('media');
+    expect(ops.length).toBeGreaterThan(0);
+
+    const log = await readDocOpLog();
+    expect(log.entries).toHaveLength(1);
+
+    const undo = await undoLastDocOp();
+    expect(undo.undone).toBe(true);
+    expect((await readComposition()).tracks).toEqual([]);
+  });
+
+  it('mutateComposition rejects a stale expectedBaseRev (the guard applyVerbs retries on)', async () => {
+    await mutateComposition([{ op: 'setCanvas', width: 1280 }]); // rev 1
+    await expect(
+      mutateComposition([{ op: 'setCanvas', height: 720 }], { expectedBaseRev: 0 }),
+    ).rejects.toBeInstanceOf(CompositionConflictError);
+    const doc = await mutateComposition([{ op: 'setCanvas', height: 720 }], { expectedBaseRev: 1 });
+    expect(doc.rev).toBe(2);
+  });
+
+  it('a burst of concurrent applyVerbs all land — none lost to the retry cap', async () => {
+    // All N writers read the same base rev (held at a barrier in `ingest` until
+    // every writer has lowered), then race the commit. Each conflicts on the
+    // stale expectedBaseRev and re-lowers, so writer k commits on attempt k —
+    // forcing up to N attempts. N=6 exceeds the old hardcoded cap of 4 (which
+    // dropped the 5th/6th with a CompositionConflictError) and stays within
+    // MAX_COMMIT_ATTEMPTS, so the fix must land all six.
+    const N = 6;
+    const DUR = 5;
+    await mutateComposition([{ op: 'addTrack', track: videoTrack({ id: 'v0' }) }]);
+
+    let arrived = 0;
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const barrierCtx: VerbContext = {
+      speechLevels: async () => null,
+      readTimeline: async () => {
+        throw new Error('not used');
+      },
+      defaultTrack: 'v0',
+      analyzeSilence: async () => {
+        throw new Error('not used');
+      },
+      transcript: async () => {
+        throw new Error('not used');
+      },
+      ingest: async () => {
+        if (arrived < N) {
+          arrived++;
+          if (arrived === N) openGate();
+        }
+        await gate;
+        return { mediaId: M, durationSec: DUR };
+      },
+    };
+
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        applyVerbs([{ verb: 'add_media', path: '/a.mp4' }], barrierCtx),
+      ),
+    );
+    expect(results).toHaveLength(N);
+
+    const doc = await readComposition();
+    const starts = (doc.tracks[0]?.clips ?? []).map((c) => c.startSec).sort((a, b) => a - b);
+    // All six landed, abutting with no overlap or gap (proves no edit was lost).
+    expect(starts).toEqual([0, 1, 2, 3, 4, 5].map((i) => i * DUR));
+    // One undoable entry per landed edit, plus the seeding addTrack.
+    expect((await readDocOpLog()).entries).toHaveLength(N + 1);
+  });
+});
